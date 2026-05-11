@@ -11,10 +11,10 @@ from PIL import Image
 @dataclass(frozen=True)
 class CropConfig:
     """Pixel crop margins from each side."""
-    left: int = 0
-    top: int = 125
+    left: int = 55
+    top: int = 110
     right: int = 0
-    bottom: int = 55
+    bottom: int = 100
 
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}

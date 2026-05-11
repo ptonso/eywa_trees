@@ -14,6 +14,20 @@ from eywa_trees.backend.pathway_builders import build_pathway_inputs_from_model
 Array = np.ndarray
 
 
+@dataclass(frozen=True)
+class PathStep:
+    feature_idx: int
+    feature_name: str
+    threshold: float
+    direction: str
+    inclusive: bool
+    tree_depth: int
+    path_position: int
+    tree_id: int
+    leaf_node_id: int
+    leaf_index: str
+
+
 @dataclass(init=False)
 class PathwaySet:
     """
@@ -43,6 +57,7 @@ class PathwaySet:
     label_names: Optional[np.ndarray]
     ecdf_dict: Dict[int, ECDF]
     n_trees: int
+    path_steps: List[List["PathStep"]]
 
     def __init__(
         self,
@@ -95,8 +110,10 @@ class PathwaySet:
             output,
             leaf_index,
             tree_id,
+            path_steps,
         ) = self._extract_paths(
             trees,
+            feature_names=feature_names_list,
             n_features=n_features,
             is_classifier=is_classifier,
             n_classes=n_classes,
@@ -138,6 +155,7 @@ class PathwaySet:
         self.label_names = label_names
         self.ecdf_dict = ecdf_dict
         self.n_trees = int(n_trees) if n_trees else 0
+        self.path_steps = path_steps
 
         if not verbose:
             return
@@ -221,11 +239,25 @@ class PathwaySet:
     def _extract_paths(
         self,
         trees: List[Any],
+        feature_names: List[str],
         n_features: int,
         is_classifier: bool,
         n_classes: int,
         X_train: Optional[np.ndarray] = None,
-    ) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    ) -> tuple[
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        List[List[PathStep]],
+    ]:
         if not trees:
             return self._empty_arrays(n_features, n_classes, is_classifier)
 
@@ -240,6 +272,7 @@ class PathwaySet:
         output_list: List[Any] = []
         leaf_index_list: List[str] = []
         tree_id_list: List[int] = []
+        path_steps_list: List[List[PathStep]] = []
 
         for tree_idx, tree_ in enumerate(trees):
             node_counts = self._node_counts_for_tree(tree_, X_train)
@@ -253,6 +286,7 @@ class PathwaySet:
             )
 
             for local_leaf_idx, leaf_idx in enumerate(leaf_idxs):
+                leaf_label = f"{tree_idx}_{local_leaf_idx}"
                 (
                     features_lower,
                     features_upper,
@@ -262,9 +296,13 @@ class PathwaySet:
                     n_leaf,
                     path_prob_mc,
                     output,
+                    path_steps,
                 ) = self._get_path_from_leaf(
                     tree_=tree_,
                     leaf_idx=leaf_idx,
+                    feature_names=feature_names,
+                    tree_idx=tree_idx,
+                    leaf_label=leaf_label,
                     n_features=n_features,
                     root_samples=root_samples,
                     node_counts=node_counts,
@@ -280,8 +318,9 @@ class PathwaySet:
                 leaf_cover_list.append(float(leaf_cover))
                 path_prob_mc_list.append(float(path_prob_mc))
                 output_list.append(output)
-                leaf_index_list.append(f"{tree_idx}_{local_leaf_idx}")
+                leaf_index_list.append(leaf_label)
                 tree_id_list.append(tree_idx)
+                path_steps_list.append(path_steps)
 
         if not n_samples_list:
             return self._empty_arrays(n_features, n_classes, is_classifier)
@@ -329,6 +368,7 @@ class PathwaySet:
             output,
             leaf_index,
             tree_id,
+            path_steps_list,
         )
 
     def _empty_arrays(
@@ -336,7 +376,20 @@ class PathwaySet:
         n_features: int,
         n_classes: int,
         is_classifier: bool,
-    ) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    ) -> tuple[
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        Array,
+        List[List[PathStep]],
+    ]:
         features_lower = np.empty((0, n_features), dtype=float)
         features_upper = np.empty((0, n_features), dtype=float)
         features_lower_inclusive = np.empty((0, n_features), dtype=bool)
@@ -363,6 +416,7 @@ class PathwaySet:
             output,
             leaf_index,
             tree_id,
+            [],
         )
 
     def _leaf_cover_for_leaf(
@@ -492,11 +546,14 @@ class PathwaySet:
         self,
         tree_: Any,
         leaf_idx: int,
+        feature_names: List[str],
+        tree_idx: int,
+        leaf_label: str,
         n_features: int,
         root_samples: int,
         node_counts: np.ndarray,
         is_classifier: bool,
-    ) -> tuple[Array, Array, Array, Array, Array, float, float, Array | float]:
+    ) -> tuple[Array, Array, Array, Array, Array, float, float, Array | float, List[PathStep]]:
         if is_classifier:
             probas = tree_.value[leaf_idx][0]
             total = probas.sum()
@@ -515,6 +572,7 @@ class PathwaySet:
         features_upper_inclusive = np.zeros(n_features, dtype=bool)
         features_lower_inclusive = np.zeros(n_features, dtype=bool)
         features_upper_depth = np.full(n_features, -1, dtype=int)
+        raw_steps_rev: List[tuple[int, float, str, bool]] = []
 
         node_id = leaf_idx
         depth_from_leaf = 0
@@ -549,6 +607,7 @@ class PathwaySet:
                         features_upper_depth[feature] = depth_from_leaf
                     elif np.isclose(features_upper[feature], threshold):
                         features_upper_inclusive[feature] = bool(features_upper_inclusive[feature]) and bool(is_inclusive)
+                raw_steps_rev.append((int(feature), threshold, bound, bool(is_inclusive)))
 
             node_id = pid
 
@@ -556,6 +615,27 @@ class PathwaySet:
             valid = features_upper_depth >= 0
             if np.any(valid):
                 features_upper_depth[valid] = depth_from_leaf - features_upper_depth[valid]
+
+        ordered_steps = list(reversed(raw_steps_rev))
+        path_steps = [
+            PathStep(
+                feature_idx=feature_idx,
+                feature_name=(
+                    feature_names[feature_idx]
+                    if 0 <= feature_idx < len(feature_names)
+                    else str(feature_idx)
+                ),
+                threshold=float(threshold),
+                direction=direction,
+                inclusive=inclusive,
+                tree_depth=pos,
+                path_position=pos,
+                tree_id=int(tree_idx),
+                leaf_node_id=int(leaf_idx),
+                leaf_index=leaf_label,
+            )
+            for pos, (feature_idx, threshold, direction, inclusive) in enumerate(ordered_steps)
+        ]
 
         return (
             features_lower,
@@ -566,6 +646,7 @@ class PathwaySet:
             n_leaf,
             path_prob_mc,
             output,
+            path_steps,
         )
 
     def _calculate_path_prob_by_ecdf(

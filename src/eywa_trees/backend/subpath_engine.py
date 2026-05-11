@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import combinations
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from eywa_trees.backend.ecdf_rule_group import ecdf_bin_indices
-from eywa_trees.backend.pset import PathwaySet
+from eywa_trees.backend.focused_tree import (
+    FocusedTreeLeaf,
+    FocusedTreeStep,
+    build_linear_focused_tree,
+)
+from eywa_trees.backend.pset import PathStep, PathwaySet
 from eywa_trees.backend.rule_engine import RuleEngine, SortMode
-from eywa_trees.backend.vistree import VisTree, VisNode
+from eywa_trees.backend.vistree import VisTree
 
 
 Array = np.ndarray
@@ -20,17 +24,23 @@ class SubPathGroup:
     group_id: int
     feature: str
     feature_idx: int
-    bin_id: int
     threshold_mean: float
     threshold_min: float
     threshold_max: float
-    direction: str  # "upper" (<=) or "lower" (>)
+    direction: str
     inclusive: bool
 
 
+@dataclass(frozen=True)
+class _GroupedPathStep:
+    group_id: int
+    tree_depth: int
+
+
 @dataclass
-class SubPathCombo:
+class SubPathCandidate:
     group_ids: Tuple[int, ...]
+    feature_indices: Tuple[int, ...]
     count: int
     coverage: float
     coverage_std: float
@@ -39,10 +49,20 @@ class SubPathCombo:
     pred: Array | float
     pred_text: str
     path_indices: Array
+    depth_values: Tuple[Tuple[int, ...], ...]
+
+
+@dataclass(frozen=True)
+class SubPathQuery:
+    candidates: List[SubPathCandidate]
+    selected: Optional[SubPathCandidate]
+    rank_index: int
+    total: int
+    empty_reason: Optional[str]
 
 
 class SubPathEngine:
-    """Precompute grouped sub-path combinations across all paths."""
+    """Explore exact-length ordered path segments aggregated across all paths."""
 
     def __init__(
         self,
@@ -54,427 +74,358 @@ class SubPathEngine:
         self.rule_engine = rule_engine
         self.ecdf_dict = rule_engine.ecdf_dict or {}
         self.ecdf_config = rule_engine.ecdf_config
-        self.features_upper = pset.features_upper
-        self.features_lower = pset.features_lower
-        self.features_upper_inclusive = getattr(
-            pset,
-            "features_upper_inclusive",
-            np.ones_like(self.features_upper, dtype=bool),
-        )
-        self.features_lower_inclusive = getattr(
-            pset,
-            "features_lower_inclusive",
-            np.ones_like(self.features_lower, dtype=bool),
-        )
-        if (
-            path_order is not None
-            and self.features_upper.size
-            and path_order.size == self.features_upper.shape[0]
-        ):
-            self.features_upper = self.features_upper[path_order]
-            self.features_lower = self.features_lower[path_order]
-            self.features_upper_inclusive = self.features_upper_inclusive[path_order]
-            self.features_lower_inclusive = self.features_lower_inclusive[path_order]
-        self.max_length = max_length
-        self.n_paths = self.features_upper.shape[0] if self.features_upper.size else 0
-        self.n_features = self.features_upper.shape[1] if self.features_upper.size else 0
+        self.feature_names = list(rule_engine.feature_names or [])
+        self.feature_name_to_index = {
+            name: idx for idx, name in enumerate(self.feature_names)
+        }
+        self.path_steps = list(getattr(pset, "path_steps", []))
+        if path_order is not None and path_order.size == len(self.path_steps):
+            order = path_order.astype(int).tolist()
+            self.path_steps = [self.path_steps[idx] for idx in order]
 
-        upper_bins, lower_bins = self._compute_feature_bins()
-        self.groups, self._group_id_by_bin = self._build_groups(upper_bins, lower_bins)
-        self.upper_group_ids, self.lower_group_ids = self._build_group_id_arrays(
-            upper_bins,
-            lower_bins,
-            self._group_id_by_bin,
-        )
-        self._path_group_sets = self._build_path_group_sets()
+        self.n_paths = len(self.path_steps)
+        self.groups: Dict[int, SubPathGroup] = {}
+        self.grouped_paths: List[List[_GroupedPathStep]] = []
+        self.max_length = int(max_length) if max_length is not None else 0
+        self.candidates_by_length: Dict[int, List[SubPathCandidate]] = {}
+        self.candidate_lookup: Dict[Tuple[int, ...], SubPathCandidate] = {}
+        self.sorted_by_length: Dict[int, Dict[SortMode, List[SubPathCandidate]]] = {}
 
+        self.groups, self.grouped_paths = self._build_groups_and_paths()
         self.max_length = self._infer_max_length(self.max_length)
-        self.combos_by_length: Dict[int, List[SubPathCombo]] = {}
-        self.combo_lookup: Dict[Tuple[int, ...], SubPathCombo] = {}
-        self.sorted_by_length: Dict[int, Dict[SortMode, List[SubPathCombo]]] = {}
-        self._precompute_combos()
+        self._precompute_candidates()
 
-    def top_combos(
+    def query(
         self,
+        *,
         length: int,
+        selected_features: Sequence[str] | Sequence[int],
         sort_mode: SortMode,
-        top_k: int,
-    ) -> List[SubPathCombo]:
-        length = int(max(1, min(length, self.max_length)))
-        sorted_map = self.sorted_by_length.get(length, {})
-        combos = sorted_map.get(sort_mode, [])
-        return combos[:top_k]
+        rank_index: int = 0,
+    ) -> SubPathQuery:
+        normalized_length = int(max(1, min(int(length or 1), max(1, self.max_length))))
+        selected_feature_indices = self._normalize_selected_features(selected_features)
+        if len(selected_feature_indices) > normalized_length:
+            return SubPathQuery(
+                candidates=[],
+                selected=None,
+                rank_index=0,
+                total=0,
+                empty_reason=(
+                    f"Select at most {normalized_length} feature"
+                    f"{'' if normalized_length == 1 else 's'} for path length {normalized_length}."
+                ),
+            )
 
-    def ordered_group_ids(self, group_ids: Tuple[int, ...]) -> List[int]:
-        def _sort_key(gid: int) -> Tuple[str, int, float]:
-            info = self.groups[gid]
-            dir_key = 0 if info.direction == "upper" else 1
-            inclusive_key = 0 if info.inclusive else 1
-            return (info.feature, dir_key, inclusive_key, float(info.bin_id))
+        candidates = self.filtered_candidates(
+            length=normalized_length,
+            selected_features=selected_feature_indices,
+            sort_mode=sort_mode,
+        )
+        if not candidates:
+            return SubPathQuery(
+                candidates=[],
+                selected=None,
+                rank_index=0,
+                total=0,
+                empty_reason="No matching path found for this length and feature selection.",
+            )
 
-        return sorted(group_ids, key=_sort_key)
+        idx = int(rank_index or 0)
+        idx = max(0, min(idx, len(candidates) - 1))
+        return SubPathQuery(
+            candidates=candidates,
+            selected=candidates[idx],
+            rank_index=idx,
+            total=len(candidates),
+            empty_reason=None,
+        )
 
-    def combo_stats(self, group_ids: Tuple[int, ...]) -> Optional[SubPathCombo]:
-        return self.combo_lookup.get(tuple(group_ids))
+    def filtered_candidates(
+        self,
+        *,
+        length: int,
+        selected_features: Sequence[str] | Sequence[int],
+        sort_mode: SortMode,
+    ) -> List[SubPathCandidate]:
+        normalized_length = int(max(1, min(int(length or 1), max(1, self.max_length))))
+        selected_feature_indices = set(self._normalize_selected_features(selected_features))
+        candidates = self.sorted_by_length.get(normalized_length, {}).get(sort_mode, [])
+        if not selected_feature_indices:
+            return candidates
+        return [
+            candidate
+            for candidate in candidates
+            if selected_feature_indices.issubset(set(candidate.feature_indices))
+        ]
 
-    def build_combo_tree(self, combo: SubPathCombo) -> VisTree:
-        ordered = self.ordered_group_ids(combo.group_ids)
-        vis_tree = VisTree(
-            model=None,
-            feature_names=self.rule_engine.feature_names,
+    def build_candidate_tree(self, candidate: SubPathCandidate) -> VisTree:
+        mask = np.zeros(self.rule_engine.n_paths, dtype=bool)
+        mask[candidate.path_indices] = True
+        leaf_hist = self.rule_engine.histogram_for_mask(mask)
+        step_specs: List[FocusedTreeStep] = []
+
+        for idx, gid in enumerate(candidate.group_ids):
+            prefix = candidate.group_ids[: idx + 1]
+            prefix_candidate = self.candidate_lookup.get(prefix, candidate)
+            group = self.groups[gid]
+            step_specs.append(
+                FocusedTreeStep(
+                    feature_idx=group.feature_idx,
+                    threshold=group.threshold_mean,
+                    split_operator=self._split_operator_for_group(group),
+                    branch_is_left=(group.direction == "upper"),
+                    summary=self._candidate_summary(prefix_candidate),
+                    threshold_min=group.threshold_min,
+                    threshold_max=group.threshold_max,
+                )
+            )
+
+        return build_linear_focused_tree(
+            feature_names=self.feature_names,
             class_names=self.rule_engine.class_names,
             is_classifier=self.rule_engine.is_classification,
-            uses_scores=bool(not self.rule_engine.is_classification and self.rule_engine.pred_vector is not None),
+            uses_scores=bool(
+                not self.rule_engine.is_classification
+                and self.rule_engine.pred_vector is not None
+            ),
+            steps=step_specs,
+            leaf=FocusedTreeLeaf(
+                summary=self._candidate_summary(candidate),
+                hist=leaf_hist,
+            ),
         )
 
-        vis_tree.max_depth = max(0, len(ordered))
-        vis_tree.n_train = int(round(combo.n_train))
-        if self.rule_engine.is_classification and isinstance(combo.pred, np.ndarray):
-            vis_tree.n_classes = combo.pred.shape[0]
+    def depth_histogram_for_node(
+        self,
+        candidate: SubPathCandidate,
+        node_index: int,
+    ) -> Optional[Dict[str, object]]:
+        if node_index < 0 or node_index >= len(candidate.depth_values):
+            return None
+        depth_arr = np.asarray(candidate.depth_values[node_index], dtype=int)
+        if depth_arr.size == 0:
+            return None
+        uniq, counts = np.unique(depth_arr, return_counts=True)
+        probs = counts.astype(float) / float(counts.sum())
+        return {
+            "depths": uniq.astype(int).tolist(),
+            "counts": counts.astype(int).tolist(),
+            "probs": probs.tolist(),
+            "mean_depth": float(depth_arr.mean()),
+            "total": int(depth_arr.size),
+        }
 
-        nodes: Dict[int, VisNode] = {}
-        path_nodes: List[int] = []
-        prev_id: Optional[int] = None
-        prev_rule: Optional[SubPathGroup] = None
-
-        for idx, gid in enumerate(ordered):
-            subset = tuple(sorted(ordered[: idx + 1]))
-            summary = self.combo_lookup.get(subset)
-            if summary is None:
-                summary = combo
-            rule = self.groups[gid]
-            node_is_left = True if rule.direction == "upper" else False
-            split_operator = "<=" if rule.inclusive else "<"
-
-            node = VisNode(
-                id=idx,
-                feature=rule.feature_idx,
-                threshold=rule.threshold_mean,
-                value=summary.pred,
-                parent=prev_id,
-                is_left=node_is_left,
-                left=None,
-                right=None,
-                n_train=int(round(summary.n_train)),
-                hist=None,
-                coverage=float(summary.coverage),
-                coverage_std=float(summary.coverage_std),
-                n_train_std=float(summary.n_train_std),
-                split_operator=split_operator,
+    def candidate_rule_text(self, candidate: SubPathCandidate) -> str:
+        parts: List[str] = []
+        for gid in candidate.group_ids:
+            group = self.groups[gid]
+            parts.append(
+                f"{group.feature} {self._rule_operator_for_group(group)} {group.threshold_mean:.3f}"
             )
-            node.threshold_min = float(rule.threshold_min)
-            node.threshold_max = float(rule.threshold_max)
-            nodes[idx] = node
-            path_nodes.append(idx)
+        return " -> ".join(parts)
 
-            if prev_id is not None:
-                if node_is_left:
-                    nodes[prev_id].left = idx
-                else:
-                    nodes[prev_id].right = idx
-
-            prev_id = idx
-            prev_rule = rule
-
-        leaf_id = len(ordered)
-        mask = np.zeros(self.rule_engine.n_paths, dtype=bool)
-        mask[combo.path_indices] = True
-        leaf_hist = self._histogram_for_mask(mask)
-        leaf_node = VisNode(
-            id=leaf_id,
-            feature=None,
-            threshold=None,
-            value=combo.pred,
-            parent=prev_id,
-            is_left=None,
-            left=None,
-            right=None,
-            n_train=int(round(combo.n_train)),
-            hist=leaf_hist,
-            coverage=float(combo.coverage),
-            coverage_std=float(combo.coverage_std),
-            n_train_std=float(combo.n_train_std),
-        )
-        if prev_id is not None and prev_rule is not None:
-            if prev_rule.direction == "upper":
-                nodes[prev_id].left = leaf_id
-                leaf_node.is_left = True
-            else:
-                nodes[prev_id].right = leaf_id
-                leaf_node.is_left = False
-
-        nodes[leaf_id] = leaf_node
-        path_nodes.append(leaf_id)
-
-        vis_tree.nodes = nodes
-        vis_tree.leaf_paths = {leaf_id: path_nodes}
-
-        if not vis_tree.is_classifier:
-            vals: List[float] = []
-            for node in nodes.values():
-                v = node.value
-                if isinstance(v, (np.ndarray, list, tuple)):
-                    arr = np.asarray(v, dtype=float).ravel()
-                    if arr.size:
-                        vals.append(float(arr[0]))
-                elif isinstance(v, (float, int, np.floating, np.integer)):
-                    vals.append(float(v))
-            vis_tree.possible_values = set(vals)
-
-        vis_tree._generate_color_struct()
-        return vis_tree
+    def candidate_node_text(self, candidate: SubPathCandidate, node_index: int) -> str:
+        if node_index < 0 or node_index >= len(candidate.group_ids):
+            return ""
+        group = self.groups[candidate.group_ids[node_index]]
+        return f"{group.feature} {self._rule_operator_for_group(group)} {group.threshold_mean:.3f}"
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-    def _compute_feature_bins(self) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        upper_bins: List[np.ndarray] = []
-        lower_bins: List[np.ndarray] = []
-        for j in range(self.n_features):
-            upper = np.full(self.n_paths, -1, dtype=int)
-            lower = np.full(self.n_paths, -1, dtype=int)
-            ecdf = self.ecdf_dict.get(j)
-            if ecdf is not None and self.n_paths > 0:
-                upper_vals = self.features_upper[:, j]
-                finite = np.isfinite(upper_vals)
-                if np.any(finite):
-                    upper[finite] = ecdf_bin_indices(
-                        upper_vals[finite],
-                        ecdf,
-                        self.ecdf_config,
-                    )
-                lower_vals = self.features_lower[:, j]
-                finite = np.isfinite(lower_vals)
-                if np.any(finite):
-                    lower[finite] = ecdf_bin_indices(
-                        lower_vals[finite],
-                        ecdf,
-                        self.ecdf_config,
-                    )
-            upper_bins.append(upper)
-            lower_bins.append(lower)
-        return upper_bins, lower_bins
-
-    def _build_groups(
+    def _build_groups_and_paths(
         self,
-        upper_bins: List[np.ndarray],
-        lower_bins: List[np.ndarray],
-    ) -> Tuple[Dict[int, SubPathGroup], Dict[Tuple[int, str], Dict[Tuple[int, bool], int]]]:
-        groups: Dict[int, SubPathGroup] = {}
-        group_index: Dict[Tuple[int, int, str, bool], int] = {}
-        group_id_by_bin: Dict[Tuple[int, str], Dict[Tuple[int, bool], int]] = {}
-        feature_names = self.rule_engine.feature_names or []
+    ) -> tuple[Dict[int, SubPathGroup], List[List[_GroupedPathStep]]]:
+        accumulators: Dict[int, Dict[str, object]] = {}
+        group_ids: Dict[Tuple[int, str, bool, object], int] = {}
+        grouped_paths: List[List[_GroupedPathStep]] = []
 
-        for j in range(self.n_features):
-            feat_name = feature_names[j] if j < len(feature_names) else str(j)
-            for direction, bins, values, inclusive_values in (
-                ("upper", upper_bins[j], self.features_upper[:, j], self.features_upper_inclusive[:, j]),
-                ("lower", lower_bins[j], self.features_lower[:, j], self.features_lower_inclusive[:, j]),
-            ):
-                mask = bins >= 0
-                if not np.any(mask):
-                    continue
-                combo_keys = np.unique(
-                    np.column_stack([bins[mask].astype(int), inclusive_values[mask].astype(int)]),
-                    axis=0,
+        for steps in self.path_steps:
+            grouped_steps: List[_GroupedPathStep] = []
+            for step in steps:
+                key = self._group_key(step)
+                gid = group_ids.get(key)
+                if gid is None:
+                    gid = len(group_ids)
+                    group_ids[key] = gid
+                    accumulators[gid] = {
+                        "feature": step.feature_name,
+                        "feature_idx": int(step.feature_idx),
+                        "direction": step.direction,
+                        "inclusive": bool(step.inclusive),
+                        "thresholds": [],
+                    }
+                thresholds = accumulators[gid]["thresholds"]
+                if isinstance(thresholds, list):
+                    thresholds.append(float(step.threshold))
+                grouped_steps.append(
+                    _GroupedPathStep(group_id=gid, tree_depth=int(step.tree_depth))
                 )
-                for bin_id_val, inclusive_val in combo_keys:
-                    bin_id = int(bin_id_val)
-                    inclusive = bool(inclusive_val)
-                    key = (j, bin_id, direction, inclusive)
-                    gid = group_index.setdefault(key, len(group_index))
-                    group_id_by_bin.setdefault((j, direction), {})[(bin_id, inclusive)] = gid
-                    thr_mask = (bins == bin_id) & (inclusive_values == inclusive)
-                    thr_vals = values[thr_mask]
-                    thr_vals = thr_vals[np.isfinite(thr_vals)]
-                    if thr_vals.size == 0:
-                        continue
-                    groups[gid] = SubPathGroup(
-                        group_id=gid,
-                        feature=feat_name,
-                        feature_idx=j,
-                        bin_id=int(bin_id),
-                        threshold_mean=float(np.mean(thr_vals)),
-                        threshold_min=float(np.min(thr_vals)),
-                        threshold_max=float(np.max(thr_vals)),
-                        direction=direction,
-                        inclusive=inclusive,
-                    )
-        return groups, group_id_by_bin
+            grouped_paths.append(grouped_steps)
 
-    def _build_group_id_arrays(
-        self,
-        upper_bins: List[np.ndarray],
-        lower_bins: List[np.ndarray],
-        group_id_by_bin: Dict[Tuple[int, str], Dict[Tuple[int, bool], int]],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        upper_ids = np.full((self.n_paths, self.n_features), -1, dtype=int)
-        lower_ids = np.full((self.n_paths, self.n_features), -1, dtype=int)
-        for j in range(self.n_features):
-            mapping = group_id_by_bin.get((j, "upper"), {})
-            bins = upper_bins[j]
-            inclusive_vals = self.features_upper_inclusive[:, j]
-            for (bin_id, inclusive), gid in mapping.items():
-                mask = (bins == bin_id) & (inclusive_vals == inclusive)
-                if np.any(mask):
-                    upper_ids[mask, j] = gid
-            mapping = group_id_by_bin.get((j, "lower"), {})
-            bins = lower_bins[j]
-            inclusive_vals = self.features_lower_inclusive[:, j]
-            for (bin_id, inclusive), gid in mapping.items():
-                mask = (bins == bin_id) & (inclusive_vals == inclusive)
-                if np.any(mask):
-                    lower_ids[mask, j] = gid
-        return upper_ids, lower_ids
-
-    def _build_path_group_sets(self) -> List[set[int]]:
-        path_groups: List[set[int]] = []
-        for i in range(self.n_paths):
-            group_ids: set[int] = set()
-            for j in range(self.n_features):
-                upper_gid = int(self.upper_group_ids[i, j])
-                if upper_gid >= 0:
-                    group_ids.add(upper_gid)
-                lower_gid = int(self.lower_group_ids[i, j])
-                if lower_gid >= 0:
-                    group_ids.add(lower_gid)
-            path_groups.append(group_ids)
-        return path_groups
-
-    def _prediction_for_mask(self, mask: Array) -> Array | float:
-        weights = self.rule_engine.expectation_weights[mask]
-        total_w = float(weights.sum())
-        if not np.any(mask) or total_w <= 0.0:
-            if self.rule_engine.is_classification and self.rule_engine.pred_matrix is not None:
-                return np.zeros(self.rule_engine.pred_matrix.shape[1], dtype=float)
-            return float("nan")
-
-        if self.rule_engine.is_classification and self.rule_engine.pred_matrix is not None:
-            probs = self.rule_engine.pred_matrix[mask]
-            weighted = (probs.T * weights).T
-            return weighted.sum(axis=0) / total_w
-
-        if self.rule_engine.pred_vector is None:
-            return float("nan")
-        vals = self.rule_engine.pred_vector[mask]
-        return float((vals * weights).sum() / total_w)
-
-    def _histogram_for_mask(
-        self,
-        mask: Array,
-        max_bins: int = 12,
-    ) -> Optional[Dict[str, object]]:
-        weights = self.rule_engine.expectation_weights[mask]
-        if not np.any(mask):
-            return None
-        total_w = float(weights.sum())
-        if total_w <= 0.0:
-            return None
-
-        if self.rule_engine.is_classification and self.rule_engine.pred_matrix is not None:
-            probs = self.rule_engine.pred_matrix[mask]
-            weighted = (probs.T * weights).T
-            sums = weighted.sum(axis=0)
-            if sums.size == 0:
-                return None
-            dist = sums / total_w
-            labels = (
-                list(self.rule_engine.class_names)
-                if self.rule_engine.class_names is not None
-                else [str(i) for i in range(dist.shape[0])]
+        groups: Dict[int, SubPathGroup] = {}
+        for gid, acc in accumulators.items():
+            thresholds = np.asarray(acc["thresholds"], dtype=float)
+            groups[gid] = SubPathGroup(
+                group_id=gid,
+                feature=str(acc["feature"]),
+                feature_idx=int(acc["feature_idx"]),
+                threshold_mean=float(np.mean(thresholds)) if thresholds.size else 0.0,
+                threshold_min=float(np.min(thresholds)) if thresholds.size else 0.0,
+                threshold_max=float(np.max(thresholds)) if thresholds.size else 0.0,
+                direction=str(acc["direction"]),
+                inclusive=bool(acc["inclusive"]),
             )
-            return {
-                "type": "classification",
-                "probs": dist.tolist(),
-                "labels": labels,
-                "total": total_w,
-            }
+        return groups, grouped_paths
 
-        if self.rule_engine.pred_vector is None:
-            return None
-
-        vals = np.asarray(self.rule_engine.pred_vector[mask], dtype=float)
-        finite_mask = np.isfinite(vals)
-        vals = vals[finite_mask]
-        weights = np.asarray(weights[finite_mask], dtype=float)
-        total_w = float(weights.sum())
-        if vals.size == 0 or total_w <= 0.0:
-            return None
-
-        unique_vals = np.unique(vals)
-        n_bins = min(max_bins, max(1, unique_vals.size))
-        if unique_vals.size == 1:
-            v = float(unique_vals[0])
-            eps = max(1e-6, abs(v) * 0.01)
-            edges = np.array([v - eps, v + eps])
-            counts = np.array([total_w], dtype=float)
+    def _group_key(self, step: PathStep) -> Tuple[int, str, bool, object]:
+        token: object
+        ecdf = self.ecdf_dict.get(int(step.feature_idx))
+        if ecdf is not None and np.isfinite(step.threshold):
+            try:
+                token = int(
+                    ecdf_bin_indices(
+                        np.asarray([float(step.threshold)], dtype=float),
+                        ecdf,
+                        self.ecdf_config,
+                    )[0]
+                )
+            except Exception:
+                token = round(float(step.threshold), 12)
         else:
-            edges = np.linspace(float(vals.min()), float(vals.max()), n_bins + 1)
-            counts, edges = np.histogram(vals, bins=edges, weights=weights, density=False)
+            token = round(float(step.threshold), 12)
+        return (
+            int(step.feature_idx),
+            str(step.direction),
+            bool(step.inclusive),
+            token,
+        )
 
-        freq = counts / total_w if total_w > 0 else counts
-        centers = 0.5 * (edges[:-1] + edges[1:]) if edges.size >= 2 else np.array([], dtype=float)
-        return {
-            "type": "regression",
-            "bin_edges": edges.tolist(),
-            "centers": centers.tolist(),
-            "freq": freq.tolist(),
-            "total": total_w,
-        }
+    def _infer_max_length(self, max_length: int) -> int:
+        inferred = max((len(steps) for steps in self.grouped_paths), default=1)
+        if max_length > 0:
+            return int(min(max_length, max(1, inferred)))
+        return int(max(1, inferred))
 
-    def _infer_max_length(self, max_length: Optional[int]) -> int:
-        if max_length is not None and max_length > 0:
-            return int(max_length)
-        max_len = 1
-        for groups in self._path_group_sets:
-            max_len = max(max_len, len(groups))
-        return max_len
-
-    def _precompute_combos(self) -> None:
-        combos_by_len: Dict[int, Dict[Tuple[int, ...], List[int]]] = {}
-        for idx, group_ids in enumerate(self._path_group_sets):
-            if not group_ids:
+    def _precompute_candidates(self) -> None:
+        sequences_by_length: Dict[int, Dict[Tuple[int, ...], Dict[str, object]]] = {}
+        for path_idx, steps in enumerate(self.grouped_paths):
+            if not steps:
                 continue
-            group_list = sorted(group_ids)
-            limit = min(len(group_list), self.max_length)
+            path_len = len(steps)
+            limit = min(path_len, self.max_length)
             for length in range(1, limit + 1):
-                combo_map = combos_by_len.setdefault(length, {})
-                for combo in combinations(group_list, length):
-                    combo_map.setdefault(combo, []).append(idx)
+                seq_map = sequences_by_length.setdefault(length, {})
+                for start in range(0, path_len - length + 1):
+                    window = steps[start : start + length]
+                    group_ids = tuple(step.group_id for step in window)
+                    record = seq_map.setdefault(
+                        group_ids,
+                        {
+                            "path_indices": set(),
+                            "depth_occurrences": [],
+                        },
+                    )
+                    path_indices = record["path_indices"]
+                    depth_occurrences = record["depth_occurrences"]
+                    if isinstance(path_indices, set):
+                        path_indices.add(path_idx)
+                    if isinstance(depth_occurrences, list):
+                        depth_occurrences.append(
+                            tuple(int(step.tree_depth) for step in window)
+                        )
 
-        n_paths = self.rule_engine.n_paths
-        for length, combo_map in combos_by_len.items():
-            combos: List[SubPathCombo] = []
-            for combo, indices in combo_map.items():
-                idx_arr = np.asarray(indices, dtype=int)
-                mask = np.zeros(n_paths, dtype=bool)
+        for length, seq_map in sequences_by_length.items():
+            candidates: List[SubPathCandidate] = []
+            for group_ids, record in seq_map.items():
+                path_index_set = record.get("path_indices", set())
+                if not isinstance(path_index_set, set) or not path_index_set:
+                    continue
+                idx_arr = np.asarray(sorted(path_index_set), dtype=int)
+                mask = np.zeros(self.rule_engine.n_paths, dtype=bool)
                 mask[idx_arr] = True
-                tree_count = self.rule_engine._count_trees_in_mask(mask)
                 summary = self.rule_engine.node_summary(mask)
-                pred = self._prediction_for_mask(mask)
-                combo_rec = SubPathCombo(
-                    group_ids=combo,
-                    count=int(tree_count),
+                depth_occurrences = record.get("depth_occurrences", [])
+                if not isinstance(depth_occurrences, list):
+                    depth_occurrences = []
+                depth_values = tuple(
+                    tuple(int(depths[pos]) for depths in depth_occurrences)
+                    for pos in range(length)
+                )
+                feature_indices = tuple(
+                    self.groups[gid].feature_idx for gid in group_ids
+                )
+                candidate = SubPathCandidate(
+                    group_ids=group_ids,
+                    feature_indices=feature_indices,
+                    count=int(self.rule_engine._count_trees_in_mask(mask)),
                     coverage=float(summary.get("coverage", 0.0)),
                     coverage_std=float(summary.get("coverage_std", 0.0)),
                     n_train=float(summary.get("n_train", 0.0)),
                     n_train_std=float(summary.get("n_train_std", 0.0)),
-                    pred=pred,
-                    pred_text=self.rule_engine.prediction_text(pred),
+                    pred=summary.get("pred"),
+                    pred_text=str(summary.get("pred_text", "n/a")),
                     path_indices=idx_arr,
+                    depth_values=depth_values,
                 )
-                combos.append(combo_rec)
-                self.combo_lookup[combo] = combo_rec
-            self.combos_by_length[length] = combos
+                candidates.append(candidate)
+                self.candidate_lookup[group_ids] = candidate
+
+            self.candidates_by_length[length] = candidates
             self.sorted_by_length[length] = {
                 "paths": sorted(
-                    combos,
-                    key=lambda c: (c.count, c.coverage),
+                    candidates,
+                    key=lambda candidate: (candidate.count, candidate.coverage),
                     reverse=True,
                 ),
                 "coverage": sorted(
-                    combos,
-                    key=lambda c: (c.coverage, c.count),
+                    candidates,
+                    key=lambda candidate: (candidate.coverage, candidate.count),
                     reverse=True,
                 ),
             }
+
+    def _normalize_selected_features(
+        self,
+        selected_features: Sequence[str] | Sequence[int],
+    ) -> List[int]:
+        normalized: List[int] = []
+        for value in selected_features:
+            if isinstance(value, str):
+                idx = self.feature_name_to_index.get(value)
+                if idx is None:
+                    continue
+                normalized.append(idx)
+            else:
+                try:
+                    idx = int(value)
+                except Exception:
+                    continue
+                if 0 <= idx < len(self.feature_names):
+                    normalized.append(idx)
+        deduped: List[int] = []
+        for idx in normalized:
+            if idx not in deduped:
+                deduped.append(idx)
+        return deduped
+
+    def _candidate_summary(self, candidate: SubPathCandidate) -> Dict[str, object]:
+        return {
+            "coverage": candidate.coverage,
+            "coverage_std": candidate.coverage_std,
+            "n_train": candidate.n_train,
+            "n_train_std": candidate.n_train_std,
+            "pred": candidate.pred,
+            "pred_text": candidate.pred_text,
+        }
+
+    def _split_operator_for_group(self, group: SubPathGroup) -> str:
+        if group.direction == "lower":
+            return "<" if group.inclusive else "<="
+        return "<=" if group.inclusive else "<"
+
+    def _rule_operator_for_group(self, group: SubPathGroup) -> str:
+        if group.direction == "lower":
+            return ">=" if group.inclusive else ">"
+        return "<=" if group.inclusive else "<"

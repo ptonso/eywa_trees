@@ -403,6 +403,9 @@ class GoTreePlot:
         for nid in node_ids:
             node_colors.append(self.tree.color_for_node(nid))
             node_obj = self.tree.nodes[nid]
+            extra_hover = getattr(node_obj, "extra_hover", "")
+            if extra_hover and not str(extra_hover).startswith("<br>"):
+                extra_hover = f"<br>{extra_hover}"
             if node_obj.feature is not None and node_obj.threshold is not None:
                 fname = (
                     self.tree.feature_names[node_obj.feature]
@@ -422,6 +425,7 @@ class GoTreePlot:
                     f"{thr_range}"
                     f"<br>coverage: {node_obj.coverage:.3f} ± {node_obj.coverage_std:.3f}"
                     f"<br>n_train: {node_obj.n_train} ± {node_obj.n_train_std:.1f}"
+                    f"{extra_hover}"
                 )
             else:
                 if self.tree.is_classifier:
@@ -435,6 +439,7 @@ class GoTreePlot:
                         f"{self.value_label}: {cls_name}"
                         f"<br>coverage: {node_obj.coverage:.3f} ± {node_obj.coverage_std:.3f}"
                         f"<br>n_train: {node_obj.n_train} ± {node_obj.n_train_std:.1f}"
+                        f"{extra_hover}"
                     )
                 else:
                     val = float(node_obj.value) if node_obj.value is not None else 0.0
@@ -442,6 +447,7 @@ class GoTreePlot:
                         f"{self.value_label}: {val:.4f}"
                         f"<br>coverage: {node_obj.coverage:.3f} ± {node_obj.coverage_std:.3f}"
                         f"<br>n_train: {node_obj.n_train} ± {node_obj.n_train_std:.1f}"
+                        f"{extra_hover}"
                     )
 
         base_node_size = max(6, int(16 * self.size_scale))
@@ -558,6 +564,7 @@ class GoTreePlot:
                 ),
                 hoverinfo="text",
                 hovertext=node_hover,
+                customdata=node_ids,
             )
         )
 

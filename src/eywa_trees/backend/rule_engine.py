@@ -8,8 +8,13 @@ from typing import Any, List, Optional, Literal, Dict
 import numpy as np
 import pandas as pd
 
-from eywa_trees.backend.vistree import VisTree, VisNode
 from eywa_trees.backend.ecdf_rule_group import ECDFBinConfig, RuleCluster, build_clusters
+from eywa_trees.backend.focused_tree import (
+    FocusedTreeLeaf,
+    FocusedTreeStep,
+    build_binary_focused_tree,
+)
+from eywa_trees.backend.vistree import VisTree
 
 
 Array = np.ndarray
@@ -360,86 +365,24 @@ class RuleEngine:
         left_summary["coverage"] = left_cov
         left_summary["coverage_std"] = left_cov_std
 
-        root_pred = root_summary["pred"]
-        left_pred = left_summary["pred"]
-        right_pred = right_summary["pred"]
-
-        vis_tree = VisTree(
-            model=None,
+        return build_binary_focused_tree(
             feature_names=self.feature_names,
             class_names=self.class_names,
             is_classifier=self.is_classification,
             uses_scores=bool(not self.is_classification and self.pred_vector is not None),
+            root_step=FocusedTreeStep(
+                feature_idx=cluster.feature_idx,
+                threshold=cluster.threshold_mean,
+                split_operator="<=" if cluster.upper_inclusive else "<",
+                branch_is_left=True,
+                summary=root_summary,
+                threshold_min=cluster.threshold_min,
+                threshold_max=cluster.threshold_max,
+                hist=root_hist,
+            ),
+            left_leaf=FocusedTreeLeaf(summary=left_summary, hist=left_hist),
+            right_leaf=FocusedTreeLeaf(summary=right_summary, hist=right_hist),
         )
-        vis_tree.n_train = int(root_summary["n_train"])
-        vis_tree.max_depth = 1
-
-        if self.is_classification and isinstance(root_pred, np.ndarray):
-            vis_tree.n_classes = root_pred.shape[0]
-
-        root_node = VisNode(
-            id=0,
-            feature=cluster.feature_idx,
-            threshold=cluster.threshold_mean,
-            value=root_pred,
-            parent=None,
-            is_left=None,
-            left=1,
-            right=2,
-            n_train=int(round(root_summary["n_train"])),
-            hist=root_hist,
-            coverage=float(root_summary.get("coverage", 0.0)),
-            coverage_std=float(root_summary.get("coverage_std", 0.0)),
-            n_train_std=float(root_summary.get("n_train_std", 0.0)),
-            split_operator="<=" if cluster.upper_inclusive else "<",
-        )
-        left_node = VisNode(
-            id=1,
-            feature=None,
-            threshold=None,
-            value=left_pred,
-            parent=0,
-            is_left=True,
-            left=None,
-            right=None,
-            n_train=int(round(left_summary["n_train"])),
-            hist=left_hist,
-            coverage=float(left_summary.get("coverage", 0.0)),
-            coverage_std=float(left_summary.get("coverage_std", 0.0)),
-            n_train_std=float(left_summary.get("n_train_std", 0.0)),
-        )
-        right_node = VisNode(
-            id=2,
-            feature=None,
-            threshold=None,
-            value=right_pred,
-            parent=0,
-            is_left=False,
-            left=None,
-            right=None,
-            n_train=int(round(right_summary["n_train"])),
-            hist=right_hist,
-            coverage=float(right_summary.get("coverage", 0.0)),
-            coverage_std=float(right_summary.get("coverage_std", 0.0)),
-            n_train_std=float(right_summary.get("n_train_std", 0.0)),
-        )
-
-        vis_tree.nodes = {0: root_node, 1: left_node, 2: right_node}
-        vis_tree.leaf_paths = {1: [0, 1], 2: [0, 2]}
-
-        if not vis_tree.is_classifier:
-            vals: List[float] = []
-            for v in (root_pred, left_pred, right_pred):
-                if isinstance(v, (np.ndarray, list, tuple)):
-                    arr = np.asarray(v, dtype=float).ravel()
-                    if arr.size:
-                        vals.append(float(arr[0]))
-                elif isinstance(v, (float, int, np.floating, np.integer)):
-                    vals.append(float(v))
-            vis_tree.possible_values = set(vals)
-
-        vis_tree._generate_color_struct()
-        return vis_tree
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -30,6 +30,7 @@ tests/*
 .vscode/
 *.swp
 *.swo
+.codex
 
 .DS_Store
 .DS_Store?

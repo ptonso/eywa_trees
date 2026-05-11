@@ -35,6 +35,10 @@ class VisNode:
     split_operator: str = "<="
     missing_to: Optional[str] = None
     external_id: Optional[Any] = None
+    threshold_min: Optional[float] = None
+    threshold_max: Optional[float] = None
+    extra_hover: str = ""
+    parent_edge_width: int = 1
 
 
 @dataclass

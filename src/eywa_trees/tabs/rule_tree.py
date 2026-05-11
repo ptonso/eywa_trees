@@ -21,6 +21,8 @@ class RuleTreeTabConfig:
 
 
 class RuleTreeTab:
+    _AVERAGE_PREDICTION_MAX_CHARS = 56
+
     def __init__(
         self,
         model: Any,
@@ -62,6 +64,67 @@ class RuleTreeTab:
             upper_depths=upper_depths,
         )
         self.prediction_column_label = self.rule_engine.prediction_column_label()
+        self.average_prediction_label = (
+            "Average expected score"
+            if self.prediction_column_label == "Expected score"
+            else "Average prediction"
+        )
+        (
+            self.average_prediction_text,
+            self.average_prediction_full_text,
+        ) = self._average_prediction_text()
+
+    def _average_prediction_text(self) -> tuple[str, str]:
+        root_summary = self.rule_engine.node_summary(self.rule_engine.root_mask())
+        pred = root_summary.get("pred")
+        if self.rule_engine.is_classification:
+            probs = np.asarray(pred, dtype=float)
+            if probs.ndim != 1 or probs.size == 0:
+                return "n/a", "n/a"
+            labels = (
+                self.class_names
+                if self.class_names is not None and len(self.class_names) == probs.size
+                else [str(i) for i in range(probs.size)]
+            )
+            parts = [
+                f"{label}: {prob:.3f}"
+                for label, prob in zip(labels, probs.tolist())
+            ]
+            full_text = ", ".join(parts)
+            if len(full_text) <= self._AVERAGE_PREDICTION_MAX_CHARS:
+                return full_text, full_text
+
+            ranked_parts = [
+                f"{label}: {prob:.3f}"
+                for label, prob in sorted(
+                    zip(labels, probs.tolist()),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+            ]
+            visible_parts: list[str] = []
+            for idx, part in enumerate(ranked_parts):
+                candidate = ", ".join(visible_parts + [part])
+                hidden = len(ranked_parts) - (idx + 1)
+                suffix = f", +{hidden} more" if hidden > 0 else ""
+                if len(candidate + suffix) <= self._AVERAGE_PREDICTION_MAX_CHARS:
+                    visible_parts.append(part)
+                    continue
+                if not visible_parts:
+                    visible_parts.append(part)
+                break
+
+            display_text = ", ".join(visible_parts)
+            hidden = len(ranked_parts) - len(visible_parts)
+            if hidden > 0:
+                suffix = f", +{hidden} more"
+                if len(display_text + suffix) <= self._AVERAGE_PREDICTION_MAX_CHARS:
+                    display_text += suffix
+                else:
+                    display_text += ", ..."
+            return display_text, full_text
+        text = str(root_summary.get("pred_text", "n/a"))
+        return text, text
 
     # ------------------------------------------------------------------
     # Layout
@@ -76,19 +139,54 @@ class RuleTreeTab:
             ],
             value="paths",
             inline=True,
+            style={"display": "flex", "alignItems": "center", "gap": "12px"},
         )
 
         left = html.Div(
             [
                 html.Div(
                     [
-                        html.Span(
-                            "Sort rules by:",
-                            style={"fontWeight": "bold", "marginRight": "8px"},
+                        html.Div(
+                            [
+                                html.Span(
+                                    f"{self.average_prediction_label}:",
+                                    style={"fontWeight": "bold", "marginRight": "8px"},
+                                ),
+                                html.Span(
+                                    self.average_prediction_text,
+                                    title=self.average_prediction_full_text,
+                                    style={
+                                        "flex": "1 1 auto",
+                                        "minWidth": "0",
+                                        "overflow": "hidden",
+                                        "textOverflow": "ellipsis",
+                                        "whiteSpace": "nowrap",
+                                    },
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "alignItems": "baseline",
+                                "minWidth": "0",
+                            },
                         ),
-                        sort_toggle,
+                        html.Div(
+                            [
+                                html.Span(
+                                    "Sort rules by:",
+                                    style={"fontWeight": "bold", "marginRight": "8px"},
+                                ),
+                                sort_toggle,
+                            ],
+                            style={"display": "flex", "alignItems": "center", "gap": "8px"},
+                        ),
                     ],
-                    style={"marginBottom": "8px"},
+                    style={
+                        "display": "flex",
+                        "flexDirection": "column",
+                        "gap": "6px",
+                        "marginBottom": "10px",
+                    },
                 ),
                 dash_table.DataTable(
                     id="rule-table",
