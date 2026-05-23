@@ -6,7 +6,7 @@ an interactive Dash application.
 The standardized package surface is:
 
 - Install with `pip install eywa_trees`
-- Import with `from eywa_trees import SplitDash, SplitConfig`
+- Import with `from eywa_trees import EywaTreesDash, EywaTreesConfig`
 
 It wraps a fitted decision tree or forest and exposes focused analysis tabs:
 
@@ -44,7 +44,7 @@ pip install -e .
 from sklearn.datasets import load_diabetes
 from sklearn.ensemble import RandomForestRegressor
 
-from eywa_trees import SplitDash
+from eywa_trees import EywaTreesDash
 
 data = load_diabetes(as_frame=True)
 X, y = data.data, data.target
@@ -52,7 +52,7 @@ X, y = data.data, data.target
 model = RandomForestRegressor(n_estimators=50, random_state=0)
 model.fit(X, y)
 
-app = SplitDash(
+app = EywaTreesDash(
     model,
     X_train=X,
     X_val=X,
@@ -71,13 +71,13 @@ estimator.
 
 The top-level import is intentionally small:
 
-- `SplitDash`: main application wrapper
-- `SplitConfig`: configuration dataclass used by `SplitDash.config(...)`
+- `EywaTreesDash`: main application wrapper
+- `EywaTreesConfig`: configuration dataclass used by `EywaTreesDash.config(...)`
 
 Example:
 
 ```python
-from eywa_trees import SplitConfig, SplitDash
+from eywa_trees import EywaTreesConfig, EywaTreesDash
 ```
 
 ## Notebooks

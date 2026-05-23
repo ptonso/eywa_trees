@@ -7,8 +7,7 @@ import numpy as np
 import pandas as pd
 
 from eywa_trees.logger import setup_logger
-from eywa_trees.backend.go_plot import GoTreePlot
-from eywa_trees.backend.vis_builders import build_vis_trees_from_model
+from eywa_trees.backend.vis_builders import build_vis_trees_from_model, make_tree_figure
 from eywa_trees.backend.adapters.xgboost import is_xgboost_model
 
 from eywa_trees.backend.feature_bins import FeatureBinManager
@@ -27,12 +26,19 @@ class PredictTab:
         class_names: Optional[List[str]] = None,
         show_text: bool = True,
         feature_mgr: Optional[FeatureBinManager] = None,
+        tree_plot_kind: str = "go",
+        colorscale: str = "Viridis",
+        plot_height: str = "62vh",
+        sankey_dim_alpha: float = 0.7,
     ) -> None:
         self.logger = setup_logger("api.log")
         self.model = model
         self.X_train = X_train
         self.class_names = class_names
         self.show_text = show_text
+        self.tree_plot_kind = tree_plot_kind
+        self.plot_height = plot_height
+        self.sankey_dim_alpha = float(sankey_dim_alpha)
         self.model_use_df = hasattr(model, "feature_names_in_")
         self.is_xgboost = is_xgboost_model(model)
 
@@ -41,7 +47,7 @@ class PredictTab:
         self.active_feature_names = self.feature_mgr.active_feature_names
         self.all_feature_names = self.feature_mgr.all_feature_names
         self.default_indices = self.feature_mgr.default_indices
-        self.vis_trees = build_vis_trees_from_model(model, X_train, class_names=class_names)
+        self.vis_trees = build_vis_trees_from_model(model, X_train, class_names=class_names, colorscale=colorscale)
         if not self.vis_trees:
             raise ValueError("No trees available for PredictTab.")
         self.xgb_lr = getattr(self.vis_trees[0], "learning_rate", 1.0) if self.is_xgboost else 1.0
@@ -231,7 +237,7 @@ class PredictTab:
                                     id="predict-go-plot",
                                     figure=self.initial_fig,
                                     style={
-                                        "height": "62vh",
+                                        "height": self.plot_height,
                                         "minHeight": "320px",
                                         "width": "100%",
                                     },
@@ -392,14 +398,21 @@ class PredictTab:
         tid = int(np.clip(tree_id, 0, len(self.vis_trees) - 1))
         if highlight_path is None and tid in self._go_cache:
             return self._go_cache[tid]
-        fig = GoTreePlot(
+        show_text = self._should_show_text(tid)
+        fig = make_tree_figure(
             self.vis_trees[tid],
-            show_text=self.show_text,
+            kind=self.tree_plot_kind,
+            show_text=show_text,
             highlight_path=highlight_path,
-        ).fig
+            sankey_dim_alpha=self.sankey_dim_alpha,
+        )
         if highlight_path is None:
             self._go_cache[tid] = fig
         return fig
+
+    def _should_show_text(self, tree_id: int) -> bool:
+        tid = int(np.clip(tree_id, 0, len(self.vis_trees) - 1))
+        return self.vis_trees[tid].max_depth <= 3
 
     def _predict_sample(self, sample: pd.DataFrame, tree_id: Optional[int] = None) -> str:
         if self.is_xgboost:

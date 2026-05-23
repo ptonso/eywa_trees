@@ -49,6 +49,7 @@ class SklearnTreeAdapter(BaseModelAdapter):
         X: Optional[ArrayLike] = None,
         class_names: Optional[Sequence[str]] = None,
         log_coloring: bool = False,
+        colorscale: str = "Viridis",
     ) -> List[VisTree]:
         tree_struct = getattr(model, "tree_", None)
         if tree_struct is None:
@@ -67,5 +68,6 @@ class SklearnTreeAdapter(BaseModelAdapter):
                 is_classifier=is_clf,
                 uses_scores=False,
                 log_coloring=log_coloring,
+                colorscale=colorscale,
             )
         ]

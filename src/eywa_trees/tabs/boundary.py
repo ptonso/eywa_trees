@@ -50,10 +50,14 @@ class BoundaryTab:
         X_train: pd.DataFrame,
         feature_mgr: Optional[FeatureBinManager] = None,
         latent_cfg: Optional[LatentEmbeddingConfig] = None,
+        colorscale: str = "Viridis",
+        plot_height: str = "70vh",
     ) -> None:
         self.logger = setup_logger("api.log")
         self.model = model
         self.X_train = X_train
+        self.colorscale = colorscale
+        self.plot_height = plot_height
 
         self.feature_mgr = feature_mgr or FeatureBinManager(X_train)
         self.feature_bins = self.feature_mgr.feature_bins
@@ -212,7 +216,7 @@ class BoundaryTab:
                     id="boundary-map",
                     figure=self.initial_fig,
                     style={
-                        "height": "70vh",
+                        "height": self.plot_height,
                         "minHeight": "360px",
                         "width": "100%",
                     },
@@ -587,7 +591,7 @@ class BoundaryTab:
 
         if self._latent_ok and self.grid_y is not None and self.grid_extent:
             xmin, xmax, ymin, ymax = self.grid_extent
-            colorscale: Any = "Viridis"
+            colorscale: Any = self.colorscale or "Viridis"
             zmin = None
             zmax = None
             hovertemplate = "Prediction: %{z:.2f}<extra></extra>"

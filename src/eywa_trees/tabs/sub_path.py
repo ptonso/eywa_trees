@@ -13,6 +13,7 @@ from eywa_trees.backend.go_plot import GoTreePlot
 from eywa_trees.backend.path_statistics import PathStatistics
 from eywa_trees.backend.rule_engine import RuleEngine, RuleEngineConfig, SortMode
 from eywa_trees.backend.subpath_engine import SubPathCandidate, SubPathEngine
+from eywa_trees.backend.ecdf_rule_group import ECDFBinConfig
 
 
 @dataclass
@@ -30,14 +31,17 @@ class SubPathTab:
         class_names: Optional[list[str]] = None,
         engine_config: Optional[RuleEngineConfig] = None,
         tab_config: Optional[SubPathTabConfig] = None,
+        ecdf_bin_config: Optional[ECDFBinConfig] = None,
+        max_length: Optional[int] = None,
     ) -> None:
         self.model = model
         self.X_train = X_train
         self.class_names = class_names
         self.tab_config = tab_config or SubPathTabConfig()
+        self.max_length = max_length
         self.slider_height = 300
 
-        stats = PathStatistics(model, X_train, class_names, ecdf_bin_config=None)
+        stats = PathStatistics(model, X_train, class_names, ecdf_bin_config=ecdf_bin_config)
         rules_df = stats.rules_dataframe()
         if rules_df.empty:
             raise ValueError("Empty pathway statistics — cannot build sub-path tab")
@@ -89,6 +93,7 @@ class SubPathTab:
         self.subpath_engine = SubPathEngine(
             self.rule_engine,
             stats.pset,
+            max_length=self.max_length,
             path_order=path_order,
         )
 

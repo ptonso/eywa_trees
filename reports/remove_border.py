@@ -57,10 +57,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("input_dir", type=Path, help="Directory with input images")
     parser.add_argument("output_dir", type=Path, help="Directory for cropped images")
-    parser.add_argument("--left", type=int, default=0, help="Pixels to cut from left")
-    parser.add_argument("--top", type=int, default=145, help="Pixels to cut from top")
+    parser.add_argument("--left", type=int, default=55, help="Pixels to cut from left")
+    parser.add_argument("--top", type=int, default=120, help="Pixels to cut from top")
     parser.add_argument("--right", type=int, default=0, help="Pixels to cut from right")
-    parser.add_argument("--bottom", type=int, default=40, help="Pixels to cut from bottom")
+    parser.add_argument("--bottom", type=int, default=100, help="Pixels to cut from bottom")
     parser.add_argument(
         "--recursive",
         action="store_true",

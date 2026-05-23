@@ -219,6 +219,7 @@ class XGBoostAdapter(BaseModelAdapter):
         X: Optional[ArrayLike] = None,
         class_names: Optional[Sequence[str]] = None,
         log_coloring: bool = False,
+        colorscale: str = "Viridis",
     ) -> List[VisTree]:
         feat_names = infer_feature_names(model, X)
         cls_names = infer_class_names(model, class_names)
@@ -242,6 +243,7 @@ class XGBoostAdapter(BaseModelAdapter):
                 learning_rate=lr,
                 base_score=base_score,
                 log_coloring=log_coloring,
+                colorscale=colorscale,
             )
             for tree in trees
         ]

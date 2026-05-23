@@ -7,7 +7,8 @@ with weights equal to the number of samples flowing through the edges.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import plotly.graph_objects as go
 from eywa_trees.logger import setup_logger
@@ -105,11 +106,18 @@ def debug_sankey_from_fig(fig: go.Figure, logger: Optional[Any] = None) -> None:
 
 
 class SankeyTreePlot:
+    DEFAULT_NODE_BORDER_WIDTH = 0.5
+    DEFAULT_DIM_ALPHA = 0.7
+    HIGHLIGHT_LINK_COLOR = "rgba(70,70,70,0.60)"
+    DIMMED_LINK_BASE_COLOR = "rgb(185,185,185)"
+
     def __init__(
         self,
         vis_tree: VisTree,
         show_text: bool = True,
         show_label: bool = False,
+        highlight_path: Optional[Sequence[int]] = None,
+        dim_alpha: float = DEFAULT_DIM_ALPHA,
         margin: float = 0.05,
         gap: float = 0.02,
         dev_budget: float = 0.10,
@@ -122,6 +130,14 @@ class SankeyTreePlot:
         self.vis_tree: VisTree = vis_tree
         self.show_text: bool = show_text
         self.show_label: bool = show_label
+        self.highlight_path: List[int] = list(highlight_path) if highlight_path is not None else []
+        self.highlight_nodes = set(self.highlight_path)
+        self.highlight_edges = {
+            (self.highlight_path[i], self.highlight_path[i + 1])
+            for i in range(len(self.highlight_path) - 1)
+        }
+        self.dim_alpha = float(np.clip(dim_alpha, 0.0, 1.0))
+        self._node_ids: List[int] = []
         self.max_depth: int = vis_tree.max_depth
         self.margin = float(np.clip(margin, 0.0, 0.2))
         self.gap = float(np.clip(gap, 0.0, 0.25))
@@ -174,26 +190,48 @@ class SankeyTreePlot:
             '<b style="font-size:14px;">Value:</b> %{customdata[1]}<extra></extra>'
         )
         node_labels = labels if self.show_text else [""] * len(labels)
+
+        node_colors = list(colors)
+        link_dict = dict(
+            source=sources,
+            target=targets,
+            value=values,
+            hovertemplate='<b style="font-size:14px;">n_train:</b> %{value:.0f}<extra></extra>',
+            label=edge_labels,
+        )
+        if self.highlight_nodes:
+            node_ids = self._node_ids
+            node_colors = [
+                color
+                if (i < len(node_ids) and node_ids[i] in self.highlight_nodes)
+                else self._scale_alpha(color, self.dim_alpha)
+                for i, color in enumerate(node_colors)
+            ]
+            dimmed_link_color = self._scale_alpha(
+                self.DIMMED_LINK_BASE_COLOR,
+                self.dim_alpha,
+            )
+            link_dict["color"] = [
+                self.HIGHLIGHT_LINK_COLOR
+                if (node_ids[s], node_ids[t]) in self.highlight_edges
+                else dimmed_link_color
+                for s, t in zip(sources, targets)
+            ]
+
         sankey = go.Sankey(
             arrangement="fixed",
             node=dict(
                 pad=15,
                 thickness=20,
-                line=dict(color="black", width=0.5),
+                line=dict(color="black", width=self.DEFAULT_NODE_BORDER_WIDTH),
                 label=node_labels,
-                color=colors,
+                color=node_colors,
                 x=x,
                 y=y,
                 customdata=customdata,
                 hovertemplate=hovertemplate,
             ),
-            link=dict(
-                source=sources,
-                target=targets,
-                value=values,
-                hovertemplate='<b style="font-size:14px;">n_train:</b> %{value:.0f}<extra></extra>',
-                label=edge_labels,
-            ),
+            link=link_dict,
         )
 
         fig = go.Figure(data=[sankey])
@@ -318,7 +356,34 @@ class SankeyTreePlot:
         if len(colors) < len(labels):
             colors += ["rgba(0, 0, 0, 0.8)"] * (len(labels) - len(colors))
 
+        self._node_ids = list(nodes)
+
         return labels, colors, sources, targets, values, xs, ys, customdata, edge_labels
+
+    @staticmethod
+    def _scale_alpha(color: str, alpha_scale: float) -> str:
+        """Return `color` with its alpha scaled by `alpha_scale`, preserving hue."""
+        scale = float(np.clip(alpha_scale, 0.0, 1.0))
+        if isinstance(color, str):
+            m = re.match(r"rgba?\(([^)]+)\)", color)
+            if m:
+                parts = [p.strip() for p in m.group(1).split(",")]
+                if len(parts) >= 3:
+                    r, g, b = parts[0], parts[1], parts[2]
+                    base_alpha = 1.0
+                    if len(parts) >= 4:
+                        try:
+                            base_alpha = float(parts[3])
+                        except Exception:
+                            base_alpha = 1.0
+                    alpha = float(np.clip(base_alpha * scale, 0.0, 1.0))
+                    return f"rgba({r},{g},{b},{alpha})"
+            if color.startswith("#") and len(color) >= 7:
+                r = int(color[1:3], 16)
+                g = int(color[3:5], 16)
+                b = int(color[5:7], 16)
+                return f"rgba({r},{g},{b},{scale})"
+        return f"rgba(150,150,150,{scale})"
 
     def _get_node_labels(self, node_id: int) -> Tuple[str, str]:
         node = self.vis_tree.nodes[node_id]

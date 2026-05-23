@@ -15,11 +15,12 @@ from eywa_trees.backend.feature_bins import FeatureBinManager
 from eywa_trees.tabs.model import SingleTreeTab, RandomForestTab
 from eywa_trees.tabs.predict import PredictTab
 from eywa_trees.tabs.boundary import BoundaryTab
-from eywa_trees.tabs.rule_tree import RuleTreeTab
+from eywa_trees.tabs.rule_tree import RuleTreeTab, RuleTreeTabConfig
 from eywa_trees.tabs.sub_path import SubPathTab
+from eywa_trees.backend.ecdf_rule_group import ECDFBinConfig
 
 if TYPE_CHECKING:
-    from eywa_trees.api import SplitConfig
+    from eywa_trees.api import EywaTreesConfig
 
 
 ArrayLike = Union[np.ndarray, pd.DataFrame]
@@ -32,7 +33,7 @@ _ADAPTERS = (
 )
 
 
-class SplitApp:
+class EywaTreesApp:
     """
     Internal Dash app builder. Responsible for routing model/analysis tabs based
     on the input model type and provided configuration.
@@ -46,7 +47,7 @@ class SplitApp:
         y_val: Optional[VectorLike],
         feature_names: Optional[Sequence[str]],
         class_names: Optional[Sequence[str]],
-        config: "SplitConfig",
+        config: "EywaTreesConfig",
     ) -> None:
         self.logger = setup_logger("api.log")
         self.model = model
@@ -86,6 +87,8 @@ class SplitApp:
                 tab_components.append(dcc.Tab(label="Model", value="model", children=model_tab.layout))
                 active_value = active_value or "model"
 
+        ecdf_bin_config = ECDFBinConfig(bin_width=self.config.ecdf_bin_width)
+
         if getattr(self.config, "include_predict_tab", False):
             predict_tab = PredictTab(
                 self.model,
@@ -93,6 +96,10 @@ class SplitApp:
                 class_names=self.class_names,
                 show_text=self.config.show_text,
                 feature_mgr=feature_mgr,
+                tree_plot_kind=self._resolve_plot_kind("go"),
+                colorscale=self.config.colorscale,
+                plot_height=self.config.plot_height,
+                sankey_dim_alpha=self.config.sankey_dim_alpha,
             )
             self.tabs.append(predict_tab)
             tab_components.append(dcc.Tab(label="Predict", value="predict", children=predict_tab.layout))
@@ -103,6 +110,8 @@ class SplitApp:
                 self.model,
                 self.X_train,
                 feature_mgr=feature_mgr,
+                colorscale=self.config.colorscale,
+                plot_height=self.config.plot_height,
             )
             self.tabs.append(boundary_tab)
             tab_components.append(dcc.Tab(label="Boundary", value="boundary", children=boundary_tab.layout))
@@ -112,7 +121,10 @@ class SplitApp:
             rule_tab = RuleTreeTab(
                 self.model,
                 self.X_train,
-                class_names=self.class_names
+                class_names=self.class_names,
+                tab_config=RuleTreeTabConfig(top_k_rules=self.config.top_k_rules),
+                ecdf_bin_config=ecdf_bin_config,
+                plot_height=self.config.plot_height,
             )
 
             self.tabs.append(rule_tab)
@@ -124,6 +136,8 @@ class SplitApp:
                 self.model,
                 self.X_train,
                 class_names=self.class_names,
+                ecdf_bin_config=ecdf_bin_config,
+                max_length=self.config.subpath_max_length,
             )
             self.tabs.append(subpath_tab)
             tab_components.append(dcc.Tab(label="Sub-Path", value="subpath", children=subpath_tab.layout))
@@ -157,6 +171,11 @@ class SplitApp:
             style={"backgroundColor": "white"},
         )
 
+    def _resolve_plot_kind(self, native: str) -> str:
+        """Resolve tree_plot_kind: "auto" keeps the tab's native renderer."""
+        kind = getattr(self.config, "tree_plot_kind", "auto")
+        return native if kind == "auto" else kind
+
     def _build_model_tab(self) -> Optional[object]:
         if self.model_kind in ("forest", "xgboost"):
             label = "XGBoost" if self.model_kind == "xgboost" else "RandomForest"
@@ -167,6 +186,10 @@ class SplitApp:
                 self.X_val,
                 self.y_val,
                 class_names=self.class_names,
+                tree_plot_kind=self._resolve_plot_kind("sankey"),
+                colorscale=self.config.colorscale,
+                plot_height=self.config.plot_height,
+                sankey_dim_alpha=self.config.sankey_dim_alpha,
             )
         if self.model_kind == "tree":
             self.logger.info("Routing to SingleTree tab")
@@ -177,6 +200,10 @@ class SplitApp:
                 self.y_val,
                 class_names=self.class_names,
                 show_text=self.config.show_text,
+                tree_plot_kind=self._resolve_plot_kind("sankey"),
+                colorscale=self.config.colorscale,
+                plot_height=self.config.plot_height,
+                sankey_dim_alpha=self.config.sankey_dim_alpha,
             )
         self.logger.error("Unsupported model type for model tab")
         return None

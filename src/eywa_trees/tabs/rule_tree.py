@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from eywa_trees.backend.rule_engine import RuleEngine, RuleEngineConfig, SortMode
 from eywa_trees.backend.go_plot import GoTreePlot
 from eywa_trees.backend.path_statistics import PathStatistics
+from eywa_trees.backend.ecdf_rule_group import ECDFBinConfig
 
 
 @dataclass
@@ -30,13 +31,16 @@ class RuleTreeTab:
         class_names: Optional[list[str]] = None,
         engine_config: Optional[RuleEngineConfig] = None,
         tab_config: Optional[RuleTreeTabConfig] = None,
+        ecdf_bin_config: Optional[ECDFBinConfig] = None,
+        plot_height: str = "60vh",
     ) -> None:
         self.model = model
         self.X_train = X_train
         self.class_names = class_names
         self.tab_config = tab_config or RuleTreeTabConfig()
+        self.plot_height = plot_height
 
-        stats = PathStatistics(model, X_train, class_names, ecdf_bin_config=None)
+        stats = PathStatistics(model, X_train, class_names, ecdf_bin_config=ecdf_bin_config)
         rules_df = stats.rules_dataframe()
         if rules_df.empty:
             raise ValueError("Empty pathway statistics — cannot build rules tab")
@@ -230,7 +234,7 @@ class RuleTreeTab:
                 dcc.Graph(
                     id="rule-tree-plot",
                     style={
-                        "height": "60vh",
+                        "height": self.plot_height,
                         "width": "80%",
                         "maxWidth": "900px",
                         "margin": "0 auto",

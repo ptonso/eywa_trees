@@ -30,6 +30,7 @@ class AdapterProtocol(Protocol):
         X: Optional[ArrayLike] = None,
         class_names: Optional[Sequence[str]] = None,
         log_coloring: bool = False,
+        colorscale: str = "Viridis",
     ) -> List[VisTree]: ...
 
 
@@ -65,6 +66,7 @@ class BaseModelAdapter(ABC):
         X: Optional[ArrayLike] = None,
         class_names: Optional[Sequence[str]] = None,
         log_coloring: bool = False,
+        colorscale: str = "Viridis",
     ) -> List[VisTree]:
         raise NotImplementedError
 
@@ -112,6 +114,7 @@ def build_vis_tree_from_struct(
     learning_rate: float = 1.0,
     base_score: float = 0.0,
     log_coloring: bool = False,
+    colorscale: str = "Viridis",
 ) -> VisTree:
     feat_names_list = list(feature_names) if feature_names is not None else None
     class_names_list = [str(c) for c in list(class_names)] if class_names is not None else None
@@ -123,6 +126,7 @@ def build_vis_tree_from_struct(
         is_classifier=is_classifier,
         uses_scores=uses_scores,
         log_coloring=log_coloring,
+        colorscale=colorscale,
         learning_rate=learning_rate,
         base_score=base_score,
     )

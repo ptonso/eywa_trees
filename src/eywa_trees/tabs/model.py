@@ -8,9 +8,8 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, mean_absolute_error
 
 from eywa_trees.logger import setup_logger
-from eywa_trees.backend.sankey_plot import SankeyTreePlot
 from eywa_trees.backend.adapters.xgboost import is_xgboost_model
-from eywa_trees.backend.vis_builders import build_vis_trees_from_model
+from eywa_trees.backend.vis_builders import build_vis_trees_from_model, make_tree_figure
 
 
 def _to_series(values: Any) -> pd.Series:
@@ -49,6 +48,10 @@ def _safe_accuracy(y_true: Any, y_pred: Any) -> float:
 class SingleTreeTab:
     """Tab that renders a single tree with a Sankey plot and metric."""
 
+    @staticmethod
+    def _should_show_text(tree_depth: int) -> bool:
+        return int(tree_depth) <= 3
+
     def __init__(
         self,
         model: Any,
@@ -57,9 +60,13 @@ class SingleTreeTab:
         y_val: Any,
         class_names: Optional[List[str]] = None,
         show_text: bool = False,
+        tree_plot_kind: str = "sankey",
+        colorscale: str = "Viridis",
+        plot_height: str = "70vh",
+        sankey_dim_alpha: float = 0.7,
     ) -> None:
         self.logger = setup_logger("api.log")
-        trees = build_vis_trees_from_model(model, X_train, class_names=class_names)
+        trees = build_vis_trees_from_model(model, X_train, class_names=class_names, colorscale=colorscale)
         if not trees:
             raise ValueError("No trees available for SingleTreeTab.")
         self.vis_tree = trees[0]
@@ -67,13 +74,21 @@ class SingleTreeTab:
         self.X_val = X_val
         self.y_val = y_val
         self.show_text = show_text
+        self.tree_plot_kind = tree_plot_kind
+        self.plot_height = plot_height
+        self.sankey_dim_alpha = float(sankey_dim_alpha)
         self.max_depth = self.vis_tree.max_depth
         self.class_names = (
             [str(c) for c in class_names]
             if class_names is not None
             else ([str(c) for c in self.vis_tree.class_names] if self.vis_tree.class_names else None)
         )
-        self.initial_sankey = SankeyTreePlot(self.vis_tree, show_text=show_text)
+        self.initial_fig = make_tree_figure(
+            self.vis_tree,
+            kind=tree_plot_kind,
+            show_text=self._should_show_text(self.max_depth),
+            sankey_dim_alpha=self.sankey_dim_alpha,
+        )
 
     @property
     def layout(self) -> html.Div:
@@ -107,8 +122,8 @@ class SingleTreeTab:
                 html.Div(
                     dcc.Graph(
                         id="st-sankey",
-                        figure=self.initial_sankey.fig,
-                        style={"height": "70vh", "minHeight": "360px", "width": "100%"},
+                        figure=self.initial_fig,
+                        style={"height": self.plot_height, "minHeight": "360px", "width": "100%"},
                     ),
                     style={"flex": "1", "padding": "20px"},
                 ),
@@ -124,7 +139,12 @@ class SingleTreeTab:
         )
         def update_sankey(max_depth: int) -> Tuple[Any, str]:
             pruned = self.vis_tree.prune(max_depth)
-            sankey_obj = SankeyTreePlot(pruned, show_text=(max_depth <= 3 or self.show_text))
+            fig = make_tree_figure(
+                pruned,
+                kind=self.tree_plot_kind,
+                show_text=self._should_show_text(max_depth),
+                sankey_dim_alpha=self.sankey_dim_alpha,
+            )
             preds = pruned.predict(self.X_val)
             if self.is_classifier:
                 pred_labels = _map_class_indices_to_labels(preds, self.class_names)
@@ -133,11 +153,15 @@ class SingleTreeTab:
             else:
                 metric = mean_absolute_error(self.y_val, preds)
                 text = f"MAE: {metric:.2f}"
-            return sankey_obj.fig, text
+            return fig, text
 
 
 class RandomForestTab:
     """Tab that renders per-tree Sankey plots for a random forest."""
+
+    @staticmethod
+    def _should_show_text(tree_depth: int) -> bool:
+        return int(tree_depth) <= 3
 
     def __init__(
         self,
@@ -146,14 +170,21 @@ class RandomForestTab:
         X_val: Any,
         y_val: Any,
         class_names: Optional[List[str]] = None,
+        tree_plot_kind: str = "sankey",
+        colorscale: str = "Viridis",
+        plot_height: str = "70vh",
+        sankey_dim_alpha: float = 0.7,
     ) -> None:
         self.logger = setup_logger("api.log")
         self.rf = model
         self.X_train = X_train
         self.X_val = X_val
         self.y_val = y_val
+        self.tree_plot_kind = tree_plot_kind
+        self.plot_height = plot_height
+        self.sankey_dim_alpha = float(sankey_dim_alpha)
 
-        self.vis_trees = build_vis_trees_from_model(model, X_train, class_names=class_names)
+        self.vis_trees = build_vis_trees_from_model(model, X_train, class_names=class_names, colorscale=colorscale)
         if not self.vis_trees:
             raise ValueError("No trees available for RandomForestTab.")
         self.is_xgboost = is_xgboost_model(model)
@@ -168,7 +199,12 @@ class RandomForestTab:
 
         self.initial_tree_id = 0
         self.initial_tree = self.vis_trees[self.initial_tree_id]
-        self.initial_sankey = SankeyTreePlot(self.initial_tree)
+        self.initial_fig = make_tree_figure(
+            self.initial_tree,
+            kind=tree_plot_kind,
+            show_text=self._should_show_text(self.initial_tree.max_depth),
+            sankey_dim_alpha=self.sankey_dim_alpha,
+        )
         self.initial_max_depth = self.initial_tree.max_depth
 
     def _tree_info_text(self, tree_id: int) -> str:
@@ -285,8 +321,8 @@ class RandomForestTab:
                         ),
                         dcc.Graph(
                             id="rf-sankey",
-                            figure=self.initial_sankey.fig,
-                            style={"height": "70vh", "minHeight": "360px", "width": "100%", "marginTop": "20px"},
+                            figure=self.initial_fig,
+                            style={"height": self.plot_height, "minHeight": "360px", "width": "100%", "marginTop": "20px"},
                         ),
                     ],
                     style={"flex": "1", "padding": "20px"},
@@ -304,8 +340,13 @@ class RandomForestTab:
         def update_rf(max_depth: int, tree_id: int) -> Tuple[Any, str, str]:
             selected = self.vis_trees[tree_id]
             pruned = selected.prune(max_depth)
-            sankey_obj = SankeyTreePlot(pruned, show_text=max_depth <= 3)
-            return sankey_obj.fig, self._tree_info_text(tree_id), self._metric_text(tree_id, max_depth)
+            fig = make_tree_figure(
+                pruned,
+                kind=self.tree_plot_kind,
+                show_text=self._should_show_text(max_depth),
+                sankey_dim_alpha=self.sankey_dim_alpha,
+            )
+            return fig, self._tree_info_text(tree_id), self._metric_text(tree_id, max_depth)
 
         @app.callback(
             [Output("rf-depth", "max"), Output("rf-depth", "marks"), Output("rf-depth", "value")],

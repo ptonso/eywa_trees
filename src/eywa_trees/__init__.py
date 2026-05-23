@@ -1,3 +1,3 @@
-from eywa_trees.api import SplitDash, SplitConfig
+from eywa_trees.api import EywaTreesDash, EywaTreesConfig
 
-__all__ = ["SplitDash", "SplitConfig"]
+__all__ = ["EywaTreesDash", "EywaTreesConfig"]

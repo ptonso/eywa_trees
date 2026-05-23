@@ -54,6 +54,7 @@ class VisTree:
     is_classifier: bool = False
     uses_scores: bool = False
     log_coloring: bool = False
+    colorscale: str = "Viridis"
     learning_rate: float = 1.0
     base_score: float = 0.0
     nodes: Dict[int, VisNode] = field(default_factory=dict)
@@ -194,7 +195,7 @@ class VisTree:
                 return
             mn, mx = min(self.possible_values), max(self.possible_values)
             ticks = np.linspace(mn, mx, n)
-            colors = px.colors.sample_colorscale("Viridis", n)
+            colors = px.colors.sample_colorscale(self.colorscale or "Viridis", n)
             self.color_struct = [
                 (ticks[i], colors[i].replace("rgb", "rgba").replace(")", f", {opacity})"))
                 for i in range(n)
