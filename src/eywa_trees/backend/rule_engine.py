@@ -114,7 +114,7 @@ class RuleEngine:
         return "n/a"
 
     def prediction_column_label(self) -> str:
-        if self.expectation_mode == "cover" and "scores" in self.pset_df.columns:
+        if "scores" in self.pset_df.columns:
             return "Expected score"
         return "Prediction"
 
@@ -395,12 +395,13 @@ class RuleEngine:
         return np.ones(self.pset_df.shape[0], dtype=float)
 
     def _extract_expectation_weights(self) -> tuple[Array, str]:
-        if "leaf_cover" in self.pset_df.columns:
-            w = self.pset_df["leaf_cover"].to_numpy(dtype=float)
-            w = np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
-            w = np.clip(w, 0.0, None)
-            if float(w.sum()) > 0.0:
-                return w, "cover"
+        if "scores" in self.pset_df.columns:
+            if self.dataset_n is not None and self.dataset_n > 0:
+                w = self.n_train / float(self.dataset_n)
+            else:
+                total = float(self.n_train.sum())
+                w = self.n_train / total if total > 0 else np.zeros_like(self.n_train, dtype=float)
+            return w, "count"
         if "path_prob_forest" in self.pset_df.columns:
             w = self.pset_df["path_prob_forest"].to_numpy(dtype=float)
         elif self.dataset_n is not None and self.dataset_n > 0:
